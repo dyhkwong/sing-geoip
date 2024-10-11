@@ -1,7 +1,8 @@
 package main
 
 import (
-	"context"
+	"bytes"
+	"compress/gzip"
 	"io"
 	"net"
 	"net/http"
@@ -9,11 +10,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/go-github/v45/github"
 	"github.com/maxmind/mmdbwriter"
 	"github.com/maxmind/mmdbwriter/inserter"
 	"github.com/maxmind/mmdbwriter/mmdbtype"
+
 	"github.com/oschwald/geoip2-golang"
 	"github.com/oschwald/maxminddb-golang"
 	"github.com/sagernet/sing-box/common/srs"
@@ -38,44 +41,6 @@ func init() {
 	githubClient = github.NewClient(transport.Client())
 }
 
-func fetch(from string) (*github.RepositoryRelease, error) {
-	fixedRelease := os.Getenv("FIXED_RELEASE")
-	names := strings.SplitN(from, "/", 2)
-	if fixedRelease != "" {
-		latestRelease, _, err := githubClient.Repositories.GetReleaseByTag(context.Background(), names[0], names[1], fixedRelease)
-		if err != nil {
-			return nil, err
-		}
-		return latestRelease, err
-	} else {
-		latestRelease, _, err := githubClient.Repositories.GetLatestRelease(context.Background(), names[0], names[1])
-		if err != nil {
-			return nil, err
-		}
-		return latestRelease, err
-	}
-}
-
-func get(downloadURL *string) ([]byte, error) {
-	log.Info("download ", *downloadURL)
-	response, err := http.Get(*downloadURL)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	return io.ReadAll(response.Body)
-}
-
-func download(release *github.RepositoryRelease) ([]byte, error) {
-	geoipAsset := common.Find(release.Assets, func(it *github.ReleaseAsset) bool {
-		return *it.Name == "Country.mmdb"
-	})
-	if geoipAsset == nil {
-		return nil, E.New("Country.mmdb not found in upstream release ", release.Name)
-	}
-	return get(geoipAsset.BrowserDownloadURL)
-}
-
 func parse(binary []byte) (metadata maxminddb.Metadata, countryMap map[string][]*net.IPNet, err error) {
 	database, err := maxminddb.FromBytes(binary)
 	if err != nil {
@@ -92,7 +57,7 @@ func parse(binary []byte) (metadata maxminddb.Metadata, countryMap map[string][]
 			return
 		}
 		// idk why
-		code := strings.ToLower(country.RegisteredCountry.IsoCode)
+		code := strings.ToLower(country.Country.IsoCode)
 		countryMap[code] = append(countryMap[code], ipNet)
 	}
 	err = networks.Err()
@@ -161,25 +126,28 @@ func write(writer *mmdbwriter.Tree, dataMap map[string][]*net.IPNet, output stri
 	return err
 }
 
-func release(source string, destination string, output string, ruleSetOutput string) error {
-	sourceRelease, err := fetch(source)
+func release(output string, ruleSetOutput string) error {
+	timeNow := time.Now()
+	resp, err := http.Get("https://download.db-ip.com/free/dbip-country-lite-" + timeNow.Format("2006") + "-" + timeNow.Format("01") + ".mmdb.gz")
 	if err != nil {
 		return err
 	}
-	destinationRelease, err := fetch(destination)
-	if err != nil {
-		log.Warn("missing destination latest release")
-	} else {
-		if os.Getenv("NO_SKIP") != "true" && strings.Contains(*destinationRelease.Name, *sourceRelease.Name) {
-			log.Info("already latest")
-			setActionOutput("skip", "true")
-			return nil
-		}
-	}
-	binary, err := download(sourceRelease)
+	defer resp.Body.Close()
+	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}
+	err = os.WriteFile("dbip-country-lite-"+timeNow.Format("2006")+"-"+timeNow.Format("01")+".mmdb.gz", data, 0644)
+	if err != nil {
+		return err
+	}
+	reader := bytes.NewReader(data)
+	gzReader, err := gzip.NewReader(reader)
+	if err != nil {
+		return err
+	}
+	defer gzReader.Close()
+	binary, err := io.ReadAll(gzReader)
 	metadata, countryMap, err := parse(binary)
 	if err != nil {
 		return err
@@ -239,7 +207,7 @@ func release(source string, destination string, output string, ruleSetOutput str
 		outputRuleSet.Close()
 	}
 
-	setActionOutput("tag", *sourceRelease.Name)
+	setActionOutput("tag", timeNow.Format("2006")+timeNow.Format("01")+"01")
 	return nil
 }
 
@@ -248,7 +216,7 @@ func setActionOutput(name string, content string) {
 }
 
 func main() {
-	err := release("Dreamacro/maxmind-geoip", "sagernet/sing-geoip", "geoip.db", "rule-set")
+	err := release("geoip.db", "rule-set")
 	if err != nil {
 		log.Fatal(err)
 	}

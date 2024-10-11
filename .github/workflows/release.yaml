@@ -5,7 +5,7 @@ on:
       tag:
         description: "The tag version you want to build"
   schedule:
-    - cron: "0 8 12 * *"
+    - cron: "0 0 2 * *"
 jobs:
   build:
     name: Build
@@ -39,17 +39,18 @@ jobs:
         run: .github/release-branch.sh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - uses: dev-drprasad/delete-older-releases@v0.3.2
-        with:
-          keep_latest: 3
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Bundle rulesets
+        if: steps.build.outputs.skip != 'true'
+        run: |
+          tar -czvf rule-set.tar.gz rule-set
       - name: Release geoip
         if: steps.build.outputs.skip != 'true'
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ steps.build.outputs.tag }}
           files: |
+            rule-set.tar.gz
+            *.mmdb.gz
             geoip.db
             geoip.db.sha256sum
             geoip-cn.db
